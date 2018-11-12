@@ -1,8 +1,11 @@
 #include <Arduino_FreeRTOS.h>
-#include <EEPROM.h>
+
+#include "db.h"
 
 void TaskSerialRead( void *pvParameters );
 void TaskTempLog( void *pvParameters );
+
+DB db;
 
 void setup() {
   Serial.begin(9600);
@@ -11,25 +14,26 @@ void setup() {
     ; // wait for serial port to connect. Needed for native USB, on LEONARDO, MICRO, YUN, and other 32u4 based boards.
   }
 
-    xTaskCreate(
-      TaskSerialRead
-      ,  (const portCHAR *)"SerialRead"   // A name just for humans
-      ,  128  // This stack size can be checked & adjusted by reading the Stack Highwater
-      ,  NULL // *pvParameters
-      ,  0  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
-      ,  NULL ); // Reference to task
+  db.init();
 
-    xTaskCreate(
-      TaskTempLog
-      ,  (const portCHAR *)"TempratureLog"   // A name just for humans
-      ,  128  // This stack size can be checked & adjusted by reading the Stack Highwater
-      ,  NULL // *pvParameters
-      ,  1  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
-      ,  NULL ); // Reference to task
-  
+  xTaskCreate(
+    TaskSerialRead
+    ,  (const portCHAR *)"SerialRead"   // A name just for humans
+    ,  128  // This stack size can be checked & adjusted by reading the Stack Highwater
+    ,  NULL // *pvParameters
+    ,  0  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
+    ,  NULL ); // Reference to task
+
+  xTaskCreate(
+    TaskTempLog
+    ,  (const portCHAR *)"TempratureLog"   // A name just for humans
+    ,  128  // This stack size can be checked & adjusted by reading the Stack Highwater
+    ,  NULL // *pvParameters
+    ,  1  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
+    ,  NULL ); // Reference to task
 }
 
-void loop() { /* NOT USED */}
+void loop() { /* NOT USED */ }
 
 void TaskSerialRead( void *pvParameters ) {
   while(1) {
@@ -38,13 +42,16 @@ void TaskSerialRead( void *pvParameters ) {
 
       switch(inputByte) {
         case('1'):
-          
+          db.printLatest();
           break;
         case('2'):
-          
+          // low power mode
           break;
         case('3'):
-          
+          db.printAll();
+          break;
+        case('c'):
+          db.clear();
           break;
         case('\n'):
           // Skip newline chars
@@ -58,11 +65,11 @@ void TaskSerialRead( void *pvParameters ) {
 }
 
 void TaskTempLog( void *pvParamaters) {
+  TempReading tr;
   while(1) {
-    double temp = GetTemp();
-    Serial.print("Temp: ");
-    Serial.print(temp, 2);
-    Serial.println(" °C");
+    tr.temp = GetTemp();
+    tr.timestamp = millis();
+    db.append(&tr);
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
@@ -83,4 +90,11 @@ double GetTemp(void) {
   t = w;
   t = (t - 273.0 + 5.0) / 1.00;
   return (t);
+}
+
+void TempReading::print() {
+  Serial.print(timestamp);
+  Serial.print(": ");
+  Serial.print(static_cast<int>(temp));
+  Serial.println(" °C");
 }
