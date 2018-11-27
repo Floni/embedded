@@ -1,11 +1,23 @@
 #include <Arduino_FreeRTOS.h>
+#include <avr/sleep.h> 
+#include <avr/wdt.h>
 
 #include "db.h"
 
+#define WAKE_PIN 2
+#define INPUT_PIN 7
+#define OUTPUT_PIN 13
+
 void TaskSerialRead( void *pvParameters );
 void TaskTempLog( void *pvParameters );
+void TaskInterrupt(void* pvParameters);
+
+void inputInterrupt();
+void wakeUpInterrupt();
 
 DB db;
+
+TaskHandle_t interruptTaskHandle;
 
 void setup() {
   Serial.begin(9600);
@@ -13,6 +25,8 @@ void setup() {
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB, on LEONARDO, MICRO, YUN, and other 32u4 based boards.
   }
+
+  Serial.println("Starting");
 
   db.init();
 
@@ -31,9 +45,56 @@ void setup() {
     ,  NULL // *pvParameters
     ,  1  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
     ,  NULL ); // Reference to task
+
+   xTaskCreate(
+    TaskInterrupt
+    ,  (const portCHAR *)"InterruptTask"   // A name just for humans
+    ,  128  // This stack size can be checked & adjusted by reading the Stack Highwater
+    ,  NULL // *pvParameters
+    ,  1  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
+    ,  &interruptTaskHandle ); // Reference to task
+  
+  pinMode(INPUT_PIN, INPUT_PULLUP);
+  pinMode(WAKE_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(INPUT_PIN), inputInterrupt, FALLING);
+  attachInterrupt(digitalPinToInterrupt(WAKE_PIN), wakeUpInterrupt, LOW);
 }
 
 void loop() { /* NOT USED */ }
+
+void sleep() {
+
+  set_sleep_mode( SLEEP_MODE_PWR_DOWN );
+ 
+  portENTER_CRITICAL();
+  
+  wdt_disable();
+  
+  //reset watchdog
+  wdt_reset();
+  
+  sleep_enable();
+   
+  // Only if there is support to disable the brown-out detection.
+  // If the brown-out is not set, it doesn't cost much to check.
+  #if defined(BODS) && defined(BODSE)
+  Qsleep_bod_disable();
+  #endif
+   
+  portEXIT_CRITICAL();
+  
+  sleep_cpu(); // Good night.
+
+   
+  // Ugh. Yawn... I've been woken up. Better disable sleep mode.
+  // Reset the sleep_mode() faster than sleep_disable();
+  sleep_reset();
+  
+  //set up WDT Interrupt (rather than the WDT Reset).
+  wdt_interrupt_enable( portUSE_WDTO );
+
+  
+}
 
 void TaskSerialRead( void *pvParameters ) {
   while(1) {
@@ -45,7 +106,12 @@ void TaskSerialRead( void *pvParameters ) {
           db.printLatest();
           break;
         case('2'):
-          // low power mode
+          Serial.println("Entering sleep...");
+          delay(5);
+         
+          sleep();
+
+          Serial.println("Woke up");
           break;
         case('3'):
           db.printAll();
@@ -61,6 +127,7 @@ void TaskSerialRead( void *pvParameters ) {
           break;
       }
     }
+    vTaskDelay(1);
   }
 }
 
@@ -68,10 +135,30 @@ void TaskTempLog( void *pvParamaters) {
   TempReading tr;
   while(1) {
     tr.temp = GetTemp();
-    tr.timestamp = millis();
+    //tr.timestamp = millis();
     db.append(&tr);
     vTaskDelay(pdMS_TO_TICKS(500));
   }
+}
+
+void TaskInterrupt(void* pvParameters) {
+  while (1) {
+    int notified = ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(1000));
+  
+    if (notified == 1) {
+      digitalWrite(OUTPUT_PIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      digitalWrite(OUTPUT_PIN, LOW);
+    }
+  }
+}
+
+void inputInterrupt() {
+  vTaskNotifyGiveFromISR(interruptTaskHandle, NULL);
+}
+
+void wakeUpInterrupt() {
+  
 }
 
 double GetTemp(void) { 
@@ -88,12 +175,12 @@ double GetTemp(void) {
   while (bit_is_set(ADCSRA, ADSC));
   unsigned int w = ADCW;
   t = w;
-  t = (t - 273.0 + 5.0) / 1.00;
+  t = (t - 273.0) / 1.00;
   return (t);
 }
 
-void TempReading::print() {
-  Serial.print(timestamp);
+void TempReading::print(CounterType counter) {
+  Serial.print(counter);
   Serial.print(": ");
   Serial.print(static_cast<int>(temp));
   Serial.println(" °C");
