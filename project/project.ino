@@ -1,4 +1,6 @@
 #include <Arduino_FreeRTOS.h>
+#include <semphr.h>
+
 #include <avr/sleep.h> 
 #include <avr/wdt.h>
 
@@ -12,6 +14,7 @@
 #define SLEEP_DELAY 100
 
 #define COLLISION_HIGH_DELAY 1000
+#define COLLISION_NOTIFY_MAX_DELAY 1000
 
 #define SERIAL_BUAD 9600
 
@@ -22,6 +25,8 @@ void TaskInterrupt(void* pvParameters);
 void inputInterrupt();
 void wakeUpInterrupt();
 
+// The mutex and database
+SemaphoreHandle_t DBmutex;
 DB db;
 
 // task handle of the task to wake when a collision interrupt occurs
@@ -32,6 +37,7 @@ void setup() {
 
   // init the database, reading from EEPROM
   db.init();
+  DBmutex = xSemaphoreCreateMutex();
 
   xTaskCreate(
     TaskSerialRead
@@ -67,6 +73,24 @@ void setup() {
 }
 
 void loop() { /* NOT USED */ }
+
+/**
+ * Take the database mutex,
+ * must be called before all database operations
+ */
+static void takeDBmutex() {
+  while (xSemaphoreTake(DBmutex, 5) == pdFALSE) {
+    vTaskDelay(1);
+  }
+}
+
+/**
+ * Releases the database mutex, 
+ * must be called after all database operations
+ */
+static void releaseDBmutex() {
+  xSemaphoreGive(DBmutex); 
+}
 
 /**
  * Puts the arduino in sleep mode,
@@ -110,36 +134,46 @@ void sleep() {
  * Task that reads from the serial port and executes the required command.
  */
 void TaskSerialRead( void *pvParameters ) {
-  while(!Serial) { vTaskDelay(1); }
+
+  // wait for serial port to start
+  while (!Serial) { vTaskDelay(1); }
   
-  for(;;) {
-    if (Serial.available() > 0) {
+  for (;;) {
+    
+    // execute all commands that are available
+    while (Serial.available() > 0) {
       int inputByte = Serial.read();
 
       switch(inputByte) {
-        case('1'):
+        case('1'): // print the latest temperature reading
+          takeDBmutex();
           db.printLatest();
+          releaseDBmutex();
           break;
-        case('2'):
-          // clear serial, prevents rx led from staying on
+        case('2'): // put arduino to sleep
           Serial.println("Sleeping");
           delay(SLEEP_DELAY);
           sleep();
           break;
-        case('3'):
+        case('3'): // print all temperature reading
+          takeDBmutex();
           db.printAll();
+          releaseDBmutex();
           break;
-        case('c'):
+        case('c'): // clear the database
+          takeDBmutex();
           db.clear();
+          releaseDBmutex();
           break;
-        case('\n'):
-          // Skip newline chars
+        case('\n'): // Skip newline chars
           break;
         default:
           Serial.println("Unkown command");
           break;
       }
     }
+
+    // put this task to sleep while no serial data is abailable
     vTaskDelay(1);
   }
 }
@@ -151,12 +185,18 @@ void TaskTempLog( void *pvParamaters) {
   TempReading tr;
   TickType_t lastWakeTime = xTaskGetTickCount();
   
-  for(;;) {
+  for (;;) {
+    // take temperature reading
     tr.temp = GetTemp();
-    
+
+    // save to database
+    takeDBmutex();
     db.append(&tr);
-    
-    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(500));
+    releaseDBmutex();
+
+    // delay 500ms taking into account 
+    // the time the reading and writing took
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(TEMP_READING_INTERVAL));
   }
 }
 
@@ -164,9 +204,11 @@ void TaskTempLog( void *pvParamaters) {
  * High priority task that responds to the collision interrupt.
  */
 void TaskInterrupt(void* pvParameters) {
-  while (1) {
-    int notified = ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(1000));
-  
+  for (;;) {
+    // wait to be notified from the ISR
+    int notified = ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(COLLISION_NOTIFY_MAX_DELAY));
+
+    // if notified turn the output pin on
     if (notified == 1) {
       digitalWrite(OUTPUT_PIN, HIGH);
       vTaskDelay(pdMS_TO_TICKS(COLLISION_HIGH_DELAY));
@@ -179,11 +221,18 @@ void TaskInterrupt(void* pvParameters) {
  * ISR for the collision interrupt, wakes the interrupt task.
  */
 void inputInterrupt() {
+  // notify the high priority task
   vTaskNotifyGiveFromISR(interruptTaskHandle, NULL);
+
+  // normally portYIELD_FROM_ISR would be called
+  // to ensure that the next task that runs is the
+  // highest priority task, but arduino rtos library
+  // doesn't implement this, so we trust the scheduler
 }
 
 /**
  * ISR that is used to wake the arduino.
+ * Does nothing but waking up from sleep
  */
 void wakeUpInterrupt() {/* nop */}
 
@@ -209,7 +258,8 @@ double GetTemp(void) {
 }
 
 /**
- * Prints a temperature reading
+ * Prints a temperature reading,
+ * implemented here because it needs access to the Serial object
  */
 void TempReading::print(CounterType counter) {
   Serial.print(counter);

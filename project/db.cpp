@@ -15,6 +15,7 @@ static void increment(IdxType& idx) {
   }
 }
 
+
 void DB::clear() {
     this->startIdx = this->endIdx = 0;
     this->startCounter = this->endCounter = 0;
