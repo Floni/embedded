@@ -8,6 +8,13 @@
 #define INPUT_PIN 7
 #define OUTPUT_PIN 13
 
+#define TEMP_READING_INTERVAL 500
+#define SLEEP_DELAY 100
+
+#define COLLISION_HIGH_DELAY 1000
+
+#define SERIAL_BUAD 9600
+
 void TaskSerialRead( void *pvParameters );
 void TaskTempLog( void *pvParameters );
 void TaskInterrupt(void* pvParameters);
@@ -17,17 +24,13 @@ void wakeUpInterrupt();
 
 DB db;
 
+// task handle of the task to wake when a collision interrupt occurs
 TaskHandle_t interruptTaskHandle;
 
 void setup() {
-  Serial.begin(9600);
-  
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for native USB, on LEONARDO, MICRO, YUN, and other 32u4 based boards.
-  }
+  Serial.begin(SERIAL_BUAD);
 
-  Serial.println("Starting");
-
+  // init the database, reading from EEPROM
   db.init();
 
   xTaskCreate(
@@ -51,19 +54,27 @@ void setup() {
     ,  (const portCHAR *)"InterruptTask"   // A name just for humans
     ,  128  // This stack size can be checked & adjusted by reading the Stack Highwater
     ,  NULL // *pvParameters
-    ,  1  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
+    ,  3  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
     ,  &interruptTaskHandle ); // Reference to task
-  
+
+  // set both interrupt pins as inputs
   pinMode(INPUT_PIN, INPUT_PULLUP);
   pinMode(WAKE_PIN, INPUT_PULLUP);
+
+  // enable the interrupts
   attachInterrupt(digitalPinToInterrupt(INPUT_PIN), inputInterrupt, FALLING);
   attachInterrupt(digitalPinToInterrupt(WAKE_PIN), wakeUpInterrupt, LOW);
 }
 
 void loop() { /* NOT USED */ }
 
+/**
+ * Puts the arduino in sleep mode,
+ * also disables the watchdog timer to prevent
+ * the arduino from waking up every 15ms.
+ */
 void sleep() {
-
+  
   set_sleep_mode( SLEEP_MODE_PWR_DOWN );
  
   portENTER_CRITICAL();
@@ -78,7 +89,7 @@ void sleep() {
   // Only if there is support to disable the brown-out detection.
   // If the brown-out is not set, it doesn't cost much to check.
   #if defined(BODS) && defined(BODSE)
-  Qsleep_bod_disable();
+  sleep_bod_disable();
   #endif
    
   portEXIT_CRITICAL();
@@ -93,11 +104,15 @@ void sleep() {
   //set up WDT Interrupt (rather than the WDT Reset).
   wdt_interrupt_enable( portUSE_WDTO );
 
-  
 }
 
+/**
+ * Task that reads from the serial port and executes the required command.
+ */
 void TaskSerialRead( void *pvParameters ) {
-  while(1) {
+  while(!Serial) { vTaskDelay(1); }
+  
+  for(;;) {
     if (Serial.available() > 0) {
       int inputByte = Serial.read();
 
@@ -106,12 +121,10 @@ void TaskSerialRead( void *pvParameters ) {
           db.printLatest();
           break;
         case('2'):
-          Serial.println("Entering sleep...");
-          delay(5);
-         
+          // clear serial, prevents rx led from staying on
+          Serial.println("Sleeping");
+          delay(SLEEP_DELAY);
           sleep();
-
-          Serial.println("Woke up");
           break;
         case('3'):
           db.printAll();
@@ -131,36 +144,52 @@ void TaskSerialRead( void *pvParameters ) {
   }
 }
 
+/**
+ * Task that logs the temperature to the database every 500ms.
+ */
 void TaskTempLog( void *pvParamaters) {
   TempReading tr;
-  while(1) {
+  TickType_t lastWakeTime = xTaskGetTickCount();
+  
+  for(;;) {
     tr.temp = GetTemp();
-    //tr.timestamp = millis();
+    
     db.append(&tr);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(500));
   }
 }
 
+/**
+ * High priority task that responds to the collision interrupt.
+ */
 void TaskInterrupt(void* pvParameters) {
   while (1) {
     int notified = ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(1000));
   
     if (notified == 1) {
       digitalWrite(OUTPUT_PIN, HIGH);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(COLLISION_HIGH_DELAY));
       digitalWrite(OUTPUT_PIN, LOW);
     }
   }
 }
 
+/**
+ * ISR for the collision interrupt, wakes the interrupt task.
+ */
 void inputInterrupt() {
   vTaskNotifyGiveFromISR(interruptTaskHandle, NULL);
 }
 
-void wakeUpInterrupt() {
-  
-}
+/**
+ * ISR that is used to wake the arduino.
+ */
+void wakeUpInterrupt() {/* nop */}
 
+/**
+ * Returns the current internal temperature of the arduino
+ */
 double GetTemp(void) { 
   double t;
   
@@ -179,6 +208,9 @@ double GetTemp(void) {
   return (t);
 }
 
+/**
+ * Prints a temperature reading
+ */
 void TempReading::print(CounterType counter) {
   Serial.print(counter);
   Serial.print(": ");

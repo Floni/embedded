@@ -4,6 +4,16 @@
 
 #define DB_DATA_ADDR sizeof(DB)
 
+constexpr IdxType getAddress(IdxType idx) {
+  return idx + DB_DATA_ADDR;
+}
+
+static void increment(IdxType& idx) {
+  idx += sizeof(TempReading);
+  if (getAddress(idx) >= E2END) {
+    idx = 0;
+  }
+}
 
 void DB::clear() {
     this->startIdx = this->endIdx = 0;
@@ -16,20 +26,15 @@ void DB::init() {
 }
 
 void DB::append(TempReading* tr) {
-    EEPROM.put(DB_DATA_ADDR + endIdx, *tr);
+    EEPROM.put(getAddress(endIdx), *tr);
     this->endCounter++;
 
-    // check for wrap
-    if (this->endIdx >= E2END) {
-      this->endIdx = 0;
-    } else {
-      this->endIdx += sizeof(TempReading);
-    }
+    // increment end index
+    increment(this->endIdx);
 
-    // inc start_idx if needed
+    // inc start index if needed
     if (this->endIdx == this->startIdx) {
-      // TODO: wrap startIdx
-      this->startIdx += sizeof(TempReading);
+      increment(this->startIdx);
       this->startCounter++;
     }
     
@@ -38,17 +43,29 @@ void DB::append(TempReading* tr) {
 
 void DB::printLatest() {
     TempReading tr;
-    // TODO: wrap endIdx - 1
-    EEPROM.get(DB_DATA_ADDR + endIdx - sizeof(TempReading), tr);
+    
+    int lastIdx = static_cast<int>(endIdx) - sizeof(TempReading);
+    if (lastIdx < 0) {
+      // TODO: alignment?
+      lastIdx = E2END;
+    }
+    
+    EEPROM.get(getAddress(lastIdx), tr);
     tr.print(this->endCounter);
 }
 
 void DB::printAll() {
     TempReading tr;
-    IdxType counter = this->startCounter;
-    for (auto idx = this->startIdx; idx != this->endIdx; idx  = (idx >= E2END ? DB_DATA_ADDR : idx + sizeof(TempReading))) {
-        EEPROM.get(DB_DATA_ADDR + idx, tr);
-        tr.print(counter);
-        counter++;
+    
+    auto counter = this->startCounter;
+    auto idx = this->startIdx;
+    
+    while (idx != this->endIdx) {
+
+      EEPROM.get(getAddress(idx), tr);
+      tr.print(counter);
+      
+      counter++;
+      increment(idx);
     }
 }
